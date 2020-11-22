@@ -12,13 +12,12 @@
 /* ************************************************************************** */
 
 #include "libterm.h"
-/*
-void	lt_update_terminal_size(void)
+
+void	lt_get_terminal_size(uint32_t *term_w, uint32_t *term_h)
 {
 	struct winsize	ws;
 
 	ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
-	g_42sh.w = (uint32_t)ws.ws_col;
-	g_42sh.h = (uint32_t)ws.ws_row;
+	*term_w = (uint32_t)ws.ws_col;
+	*term_h = (uint32_t)ws.ws_row;
 }
-*/

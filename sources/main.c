@@ -8,7 +8,11 @@
 #include <SDL2/SDL_mixer.h>
 #include "libterm.h"
 
-#define DISPLAY_SIZE	25
+/*
+**	tracer le cadre séparément (lors de la redimension de la fenêtre)
+**	+ ajouter un cadre en haut et la bordure à gauche
+*/
+
 
 typedef struct	s_song
 {
@@ -19,6 +23,51 @@ typedef struct	s_song
 	uint32_t	b;			// block size (n^2)
 }
 t_song;
+
+
+typedef struct	s_display
+{
+	uint32_t	w, h;
+	uint32_t	min_w, min_h;
+
+	uint32_t	help_len;	// h, y = 0
+
+	uint32_t	delmsg_pos;	// position y, len = 1
+
+	uint32_t	vol_pos;	// position y, len = 1
+
+	uint32_t	list_pos;	// position y
+	uint32_t	list_len;	// longueur d'affichage (h)
+	uint32_t	list_w;		// élément le plus large de la liste
+
+	uint32_t	tosmall;	// screen is to small...
+
+	uint32_t	mi;			// Music Index (dans la liste)
+	uint32_t	current;	// musique actuelle (en lecture)
+
+	int		volume;
+	int		status;			// PLAYING, STOPED, PAUSED
+
+
+	t_song		list;
+}
+t_display;
+
+
+/*
+**	GLOBALES
+*/
+t_display	display;
+const char	*help[] =
+{
+	"+/-        = volume control | up/down    = move cursor",
+	"left/right = prev/next song | d          = delete song", 
+	"space      = play/pause     | s          = stop",
+	"enter      = choose song    | q          = quit",
+	NULL
+};
+
+
 
 void	set_raw_mode(void)
 {
@@ -50,52 +99,102 @@ enum	e_status
 
 void	write_list(t_song *list, uint32_t i, uint32_t size, uint32_t disp_size, uint32_t current)
 {
+	char		line[512];
 	uint32_t	start;
 	uint32_t	half_size;
+	uint32_t	width;
+
+	if (display.tosmall)
+		return;
+
 
 	if (disp_size > size)
 		disp_size = size;
-	half_size = disp_size / 2;
-
-	if (size - i < half_size)
-		start = size - disp_size;
-	else if (i < half_size)
+//	if ((disp_size & 0x01) == 0)
+//		disp_size--;
+	
+	if (size <= disp_size)
 		start = 0;
 	else
-		start = i - half_size;
-
-	for (uint8_t j = 0; j != disp_size && j+start < list->l; j++)
 	{
-		lt_move_cursor(0, 8+j);
+		half_size = disp_size / 2;
 
-		lt_clear_end_of_line();
+		if (size - i < half_size)
+		{
+			start = size - disp_size;
+		}
+		else if ((disp_size & 0x01 && i < half_size+1) || (!(disp_size & 0x01) && i < half_size))
+			start = 0;
+		else
+		{
+			if (disp_size & 0x01)
+				start = i - half_size - 1;
+			else
+				start = i - half_size;
+		}
+	}
+
+
+	{
+		if (display.list_w > display.min_w && display.list_w < display.w)
+			width = display.list_w;
+		else if (display.list_w >= display.w)
+			width = display.w;
+		else
+			width = display.min_w;
+		lt_move_cursor(0, display.list_pos);
+		memset(line, '=', width);	// risque de segfault si on limite pas la taille des titres.
+		memcpy(line + ((width-6) / 2), " LIST ", 6);
+		lt_set_fg_color(3);
+		write(STDOUT_FILENO, line, width);
+		lt_reset_attr();
+	}
+
+	uint8_t j = 0;
+	for (; j != disp_size && j+start < list->l; j++)
+	{
+		uint32_t	write_len;
+		uint32_t	kitune_len;
+
+		lt_move_cursor(1, display.list_pos + 1 + j);
 
 		if (j+start == current)
 		{
 			lt_set_video_mode(LT_BOLD);
-			write(STDOUT_FILENO, "🦊 ", strlen("🦊 "));
+			kitune_len = write(STDOUT_FILENO, "🦊 ", strlen("🦊 "));
 		}
+		else
+			kitune_len = 0;
+
 		if (j+start == i)
 		{
 			lt_set_bg_color(7);
 			lt_set_fg_color(0);
 		}
 
-		if (list->title[j+start])
-			write(STDOUT_FILENO, list->title[j+start], strlen(list->title[j+start]));
-		else	// normalement on a toujours un titre
-			write(STDOUT_FILENO, list->path[j+start], strlen(list->path[j+start]));
+		write_len = strlen(list->title[j+start]);
+		if (write_len + kitune_len >= display.w-1)
+			write_len = display.w-1 - kitune_len;
+
+		write(STDOUT_FILENO, list->title[j+start], write_len);
 
 		if (j+start == i || j+start == current)
 			lt_reset_attr();
+
+		lt_clear_end_of_line();
 	}
+
 }
 
 void	write_status(int volume, int status)
 {
 	char	barre[64];
 	size_t	i = 0;
-	lt_move_cursor(0, 6);
+
+	if (display.tosmall)
+		return;
+
+	lt_move_cursor(0, display.vol_pos);
 	
 	volume /= 4;
 	i = sprintf(barre, "🔈 [");
@@ -107,11 +206,11 @@ void	write_status(int volume, int status)
 		i += 32 - volume;
 	}
 	if (status == PLAYING)
-		i += sprintf(barre+i, "]  ▶️");
+		i += sprintf(barre+i, "]  ▶️  playing...");
 	else if (status == PAUSED)
-		i += sprintf(barre+i, "]  ⏸");
+		i += sprintf(barre+i, "]  ⏸  paused");
 	else if (status == STOPED)
-		i += sprintf(barre+i, "]  ⏹");
+		i += sprintf(barre+i, "]  ⏹  stoped");
 	else
 	{
 		barre[i++] = ']';
@@ -120,78 +219,84 @@ void	write_status(int volume, int status)
 	}
 
 
-	write(STDOUT_FILENO, barre, i);
+	write(STDOUT_FILENO, barre, i > display.w ? display.w : i);
+	lt_clear_end_of_line();
+}
+
+void	write_help(void)
+{
+	if (display.tosmall)
+		return;
+
+	for (uint8_t i = 0; i != display.help_len; i++)
+	{
+		lt_move_cursor(0, i);
+		write(1, help[i], strlen(help[i]));
+	}
 }
 
 void	music_player_interface(t_song *list)
 {
 	Mix_Music	*music;
-	uint32_t	mi = 0;
-	uint32_t	current = 0;
-
-	int		volume = 100;
-	int		status = PLAYING;
-	char	*help[4] =
-	{
-		"+/-        = volume control | up/down    = move cursor",
-		"left/right = prev/next song | d          = delete song", 
-		"space      = play/pause     | s          = stop",
-		"enter      = choose song    | q          = quit",
-	};
 	uint8_t	button[8];
 
 
-	if ((music = Mix_LoadMUS(list->path[mi])) == NULL)
+	display.mi = 0;
+	display.current = 0;
+	display.volume = 100;
+	display.status = PLAYING;
+
+
+	if ((music = Mix_LoadMUS(list->path[display.mi])) == NULL)
 	{
 		fprintf(stderr, "ERREUR: Mix_LoadMUS(): %s\n", Mix_GetError());
 		return;
 	}
 
-
-
+	/*
+	**	Initialisation du terminal
+	*/
 	lt_init();
 	lt_full_screen_mode(LT_ON);
 	set_raw_mode();
 	lt_show_cursor(LT_OFF);
 
-	for (uint8_t i = 0; i != 4; i++)
-	{
-		lt_move_cursor(0, i);
-		write(1, help[i], strlen(help[i]));
-	}
-
-	write_status(volume, status);
-	write_list(list, mi, list->l, DISPLAY_SIZE, current);
+	/*
+	**	affichage du menu d'aide, du volume, du status, et des pistes
+	*/
+	write_help();
+	write_status(display.volume, display.status);
+	write_list(list, display.mi, list->l, display.list_len, display.current);
 
 	Mix_PlayMusic(music, 0);
-	Mix_VolumeMusic(volume);
+	Mix_VolumeMusic(display.volume);
 
 	while (1)
 	{
 		ssize_t	rlen;
 
-		if (Mix_PlayingMusic() == 0 && (status == PLAYING || status == PAUSED))
+		if (Mix_PlayingMusic() == 0 && (display.status == PLAYING || display.status == PAUSED))
 		{
-			if (current != list->l-1)
+			if (display.current != list->l-1)
 			{
-				current++;
+				display.current++;
 				Mix_HaltMusic();
 				Mix_FreeMusic(music);
-				if ((music = Mix_LoadMUS(list->path[current])) == NULL)
+				if ((music = Mix_LoadMUS(list->path[display.current])) == NULL)
 				{
 					fprintf(stderr, "ERREUR: Mix_LoadMUS(): %s\n", Mix_GetError());
 					return;
 				}
 				Mix_PlayMusic(music, 0);
-				status = PLAYING;
-				write_list(list, mi, list->l, DISPLAY_SIZE, current);
+				display.status = PLAYING;
+				write_list(list, display.mi, list->l, display.list_len, display.current);
 			}
 			else
 			{
-				status = STOPED;
-				current = UINT32_MAX;
-				write_status(volume, status);
-				write_list(list, mi, list->l, DISPLAY_SIZE, current);
+				display.status = STOPED;
+				display.current = UINT32_MAX;
+				write_status(display.volume, display.status);
+				write_list(list, display.mi, list->l, display.list_len, display.current);
 			}
 		}
 
@@ -207,35 +312,39 @@ void	music_player_interface(t_song *list)
 			{
 				if (Mix_PlayingMusic())
 				{
-					if (status == PLAYING)
+					if (display.status == PLAYING)
 					{
 						Mix_PauseMusic();
-						status = PAUSED;
+						display.status = PAUSED;
 					}
-					else if (status == PAUSED)
+					else if (display.status == PAUSED)
 					{
 						Mix_ResumeMusic();
-						status = PLAYING;
+						display.status = PLAYING;
 					}
 				}
-				else if (status == STOPED)
+				else if (display.status == STOPED)
 				{
-					if ((music = Mix_LoadMUS(list->path[mi])) == NULL)
+					display.current = display.mi;
+					if ((music = Mix_LoadMUS(list->path[display.mi])) == NULL)
 					{
 						fprintf(stderr, "ERREUR: Mix_LoadMUS(): %s\n", Mix_GetError());
 						return;
 					}
 					Mix_PlayMusic(music, 0);
-					Mix_VolumeMusic(volume);
-					status = PLAYING;
+					Mix_VolumeMusic(display.volume);
+					write_status(display.volume, display.status);
+					write_list(list, display.mi, list->l, display.list_len, display.current);
+					display.status = PLAYING;
 				}
 			}
 			else if (button[0] == 's')
 			{
 				Mix_HaltMusic();
 				Mix_FreeMusic(music);
-				current = UINT32_MAX;
-				status = STOPED;
+				music = NULL;
+				display.current = UINT32_MAX;
+				display.status = STOPED;
 			}
 			else if (button[0] == 'q')
 			{
@@ -244,10 +353,10 @@ void	music_player_interface(t_song *list)
 			}
 			else if (button[0] == 'd')
 			{
-				lt_move_cursor(0, 5);
+				lt_move_cursor(0, display.delmsg_pos);
 				lt_set_bg_color(3);
 				lt_set_fg_color(0);
-				dprintf(STDOUT_FILENO, "Delete piste %s ? (y/n)", list->title[mi]);
+				dprintf(STDOUT_FILENO, "Delete piste %s ? (y/n)", list->title[display.mi]);
 				lt_reset_attr();
 
 				while (1)
@@ -258,63 +367,63 @@ void	music_player_interface(t_song *list)
 						continue;
 					}
 
-					lt_move_cursor(0, 5);
+					lt_move_cursor(0, display.delmsg_pos);
 					lt_clear_end_of_line();
 
 					if (rlen == 1 && button[0] == 'y')
 					{
 
-						if (current == mi || list->l == 1)
+						if (display.current == display.mi || list->l == 1)
 						{
 							Mix_HaltMusic();
 							Mix_FreeMusic(music);
 							if (list->l == 1)
 								goto __end_function;
-							current = UINT32_MAX;
-							status = STOPED;
+							display.current = UINT32_MAX;
+							display.status = STOPED;
 						}
 						list->l--;
-						free(list->title[mi]);
-						memmove(list->title+mi, list->title+mi+1, (list->l - mi) * sizeof(char *));
-						free(list->path[mi]);
-						memmove(list->path+mi, list->path+mi+1, (list->l - mi) * sizeof(char *));
-						write_status(volume, status);
-						write_list(list, mi, list->l, DISPLAY_SIZE, current);
+						free(list->title[display.mi]);
+						memmove(list->title+display.mi, list->title+display.mi+1, (list->l - display.mi) * sizeof(char *));
+						free(list->path[display.mi]);
+						memmove(list->path+display.mi, list->path+display.mi+1, (list->l - display.mi) * sizeof(char *));
+						write_status(display.volume, display.status);
+						write_list(list, display.mi, list->l, display.list_len, display.current);
 					}
 					break;
 				}
 			}
 			else if (button[0] == '\n')
 			{
-				current = mi;
+				display.current = display.mi;
 				if (Mix_PlayingMusic() == 1)
 				{
 					Mix_HaltMusic();
 					Mix_FreeMusic(music);
 				}
-				if ((music = Mix_LoadMUS(list->path[mi])) == NULL)
+				if ((music = Mix_LoadMUS(list->path[display.mi])) == NULL)
 				{
 					fprintf(stderr, "ERREUR: Mix_LoadMUS(): %s\n", Mix_GetError());
 					return;
 				}
 				Mix_PlayMusic(music, 0);
-				status = PLAYING;
-				write_list(list, mi, list->l, DISPLAY_SIZE, current);
+				display.status = PLAYING;
+				write_list(list, display.mi, list->l, display.list_len, display.current);
 			}
 			else if (button[0] == '+')
 			{
-				if (volume != 128)
+				if (display.volume != 128)
 				{
-					volume += 4;
-					Mix_VolumeMusic(volume);
+					display.volume += 4;
+					Mix_VolumeMusic(display.volume);
 				}
 			}
 			else if (button[0] == '-')
 			{
-				if (volume != 0)
+				if (display.volume != 0)
 				{
-					volume -= 4;
-					Mix_VolumeMusic(volume);
+					display.volume -= 4;
+					Mix_VolumeMusic(display.volume);
 				}
 			}
 		}
@@ -322,60 +431,62 @@ void	music_player_interface(t_song *list)
 		{
 			if (memcmp(button, R_ARROW, 3) == 0)
 			{
-				if (current < list->l-1)
+				if (display.current < list->l-1)
 				{
-					current++;
+					display.current++;
 					Mix_HaltMusic();
 					Mix_FreeMusic(music);
-					if ((music = Mix_LoadMUS(list->path[current])) == NULL)
+					if ((music = Mix_LoadMUS(list->path[display.current])) == NULL)
 					{
 						fprintf(stderr, "ERREUR: Mix_LoadMUS(): %s\n", Mix_GetError());
 						return;
 					}
 					Mix_PlayMusic(music, 0);
-					status = PLAYING;
-					write_list(list, mi, list->l, DISPLAY_SIZE, current);
+					display.status = PLAYING;
+					write_list(list, display.mi, list->l, display.list_len, display.current);
 				}
 			}
 			else if (memcmp(button, L_ARROW, 3) == 0)
 			{
-				if (current != 0)
+				if (display.current != 0 && display.current != UINT32_MAX)
 				{
-					current--;
+					display.current--;
 					Mix_HaltMusic();
 					Mix_FreeMusic(music);
-					if ((music = Mix_LoadMUS(list->path[current])) == NULL)
+					if ((music = Mix_LoadMUS(list->path[display.current])) == NULL)
 					{
 						fprintf(stderr, "ERREUR: Mix_LoadMUS(): %s\n", Mix_GetError());
 						return;
 					}
 					Mix_PlayMusic(music, 0);
-					status = PLAYING;
-					write_list(list, mi, list->l, DISPLAY_SIZE, current);
+					display.status = PLAYING;
+					write_list(list, display.mi, list->l, display.list_len, display.current);
 				}
 			}
 			else if (memcmp(button, U_ARROW, 3) == 0)
 			{
-				if (mi > 0)
+				if (display.mi > 0)
 				{
-					mi--;
-					write_list(list, mi, list->l, DISPLAY_SIZE, current);
+					display.mi--;
+					write_list(list, display.mi, list->l, display.list_len, display.current);
 				}
 			}
 			else if (memcmp(button, D_ARROW, 3) == 0)
 			{
-				if (mi < list->l-1)
+				if (display.mi < list->l-1)
 				{
-					mi++;
-					write_list(list, mi, list->l, DISPLAY_SIZE, current);
+					display.mi++;
+					write_list(list, display.mi, list->l, display.list_len, display.current);
 				}
 			}
 		}
 
-		write_status(volume, status);
+		write_status(display.volume, display.status);
 	}
 
-	Mix_FreeMusic(music);
+	if (music)
+		Mix_FreeMusic(music);
+
 	__end_function:
 	set_raw_mode();
 	lt_full_screen_mode(LT_OFF);
@@ -422,6 +533,7 @@ int		music_player(t_song *list)
 char	*usc2_to_utf8_string(char *s, uint32_t len)
 {
 	uint8_t		*utf8;
+	char		*tofree = s;
 	uint32_t	j;
 	uint8_t		le = 0;
 
@@ -469,10 +581,7 @@ char	*usc2_to_utf8_string(char *s, uint32_t len)
 	}
 	utf8[j] = '\0';
 
-	if (le)
-		free(s-2);
-	else
-		free(s);
+	free(tofree);
 	return ((char*)utf8);
 }
 
@@ -619,24 +728,21 @@ char	*get_song_name_and_artist(const char *filename)
 	new_title = malloc(len+1);
 	memcpy(new_title, filename, len+1);
 	
-	uint32_t last_point = len - 1;
-	for (uint32_t i = len - 1; i != UINT32_MAX; i--)
-	{
-		if (new_title[i] == '.')
-		{
-			new_title[i] = '\0';
-			last_point = i;
-		}
-	}
+	uint32_t last_dir_sep = 0;
 
-	for (uint32_t i = last_point; i != UINT32_MAX; i--)
+	for (uint32_t i = 0; i != len; i++)
 	{
 		if (new_title[i] == '/')
-		{
-			memmove(new_title, new_title+i+1, strlen(new_title+i));
-			break;
-		}
+			last_dir_sep = i;
 	}
+
+	for (uint32_t i = len - 1; i != last_dir_sep; i--)
+	{
+		if (new_title[i] == '.')
+			new_title[i] = '\0';
+	}
+
+	memmove(new_title, new_title+last_dir_sep+1, strlen(new_title+last_dir_sep));
 
 	return (new_title);
 }
@@ -666,28 +772,31 @@ void	free_song(t_song *s)
 		}
 		free(s->path);
 		free(s->title);
+		s->path = NULL;
+		s->title = NULL;
+		s->l = 0;
 	}
-	free(s);
 }
 
 extern
-t_song	*load_list_from_playlist(const char *filename)
+void	load_list_from_playlist(const char *filename, t_song *list)
 {
 	FILE	*f = fopen(filename, "r");
 	char	*line = NULL;
-	t_song	*list = NULL;
 	size_t	len = 0;
 	char	prefix[256] = {0};
 
-
+	list->l = 0;
+	list->a = 0;
+	list->path = NULL;
+	list->title = NULL;
 
 	if (f == NULL)
 	{
 		fprintf(stderr, "ERREUR: impossible d'ouvrir %s\n", filename);
-		return (NULL);
+		return;
 	}
 
-	list = calloc(1, sizeof(t_song));
 	list->b = 0x20;
 
 	while (getline(&line, &len, f) != -1)
@@ -742,24 +851,20 @@ t_song	*load_list_from_playlist(const char *filename)
 	}
 
 	free(line);
-	return (list);
+	return;
 
 	__error:
 	fprintf(stderr, "ERREUR: syntaxe de la liste\n");
 	free(line);
 	//free tous les éléments de la liste
 	free_song(list);
-	return (NULL);
 }
 
 extern
-t_song	*load_list_from_argv(char *argv[], int argc)
+void	load_list_from_argv(char *argv[], int argc, t_song *list)
 {
-	t_song	*list = NULL;
-
-	list = calloc(1, sizeof(t_song));
-	list->b = 0x10;
-	list->a = argc + (list->b - (argc & (list->b-1)));
+	list->b = 0x0;
+	list->a = argc;
 	list->l = 0;
 	list->path = malloc(sizeof(char *) * list->a);
 	list->title = malloc(sizeof(char *) * list->a);
@@ -770,48 +875,120 @@ t_song	*load_list_from_argv(char *argv[], int argc)
 		list->title[list->l] = get_song_name_and_artist(list->path[list->l]);
 		list->l++;
 	}
-
-	return (list);
 }
 
+void	get_menu_w_and_h(t_display *display)
+{
+	uint32_t	max = 0, i = 0;
+
+	for (; help[i]; i++)
+	{
+		uint32_t	l = strlen(help[i]);
+
+		if (l > max) max = l;
+	}
+
+	display->help_len = i;
+	display->min_w = max;
+}
+
+void	recalcul_display_position(t_display *display)
+{
+	if (display->h > display->list_pos + 1)
+		display->list_len = display->h - display->list_pos;
+	else
+		display->list_len = 1;
+}
+
+void	calcul_display_position(t_display *display)
+{
+	display->delmsg_pos = display->help_len;
+	display->vol_pos = display->help_len + 1;
+	display->list_pos = display->vol_pos + 2;
+
+	display->min_h = display->list_pos + 2;
+	if (display->h < display->min_h || display->w < display->min_w)
+	{
+		display->tosmall = 1;
+		lt_clear_screen();
+	}
+	else
+		display->tosmall = 0;
+
+	if (display->h >= display->min_h)
+		display->list_len = display->h - display->list_pos - 1;		// - 1 pour la ligne de séparation
+	
+	uint32_t max = 0;
+	for (uint32_t i = 0; i != display->list.l; i++)
+	{
+		uint32_t	l = strlen(display->list.title[i]);
+
+		if (l > max)
+			max = l;
+	}
+	display->list_w = max;
+}
+
+void	get_term_size(int sig)
+{
+	lt_get_terminal_size(&display.w, &display.h);
+	recalcul_display_position(&display);
+	
+	if (display.w < display.min_w || display.h < display.min_h)
+	{
+		display.tosmall = 1;
+		lt_clear_screen();
+	}
+	else
+	{
+		if (display.tosmall)
+		{
+			display.tosmall = 0;
+		}
+		write_help();
+		write_status(display.volume, display.status);
+		write_list(&display.list, display.mi, display.list.l, display.list_len, display.current);
+	}
+}
 
 /*
-**	une liste est composée de variables et de chemins :
+**	une liste est composée de la variable $prefix et de chemins/noms de fichiers :
 **
-**	$prefix = "/Users/frantz/Music/"
+**	$prefix = "/path/with/slash/at/end/"
 **	toto.mp3
 **	...
-**	
-**	accepter un nombre indéfini d'arguments
 */
 int	main(int argc, char *argv[])
 {
-	t_song	*music_list = NULL;
-
 	if (argc < 2)
 	{
 		__print_help:
 		fprintf(stderr,
 			"%s [music path]...\n"
-			"%s --list=[list path]\n",
+			"%s --list [list path]\n",
 			*argv, *argv
 		);
 		return (1);
 	}
 
-	if (memcmp(argv[1], "--list=", 7) == 0)
+	if (strcmp(argv[1], "--list") == 0)
 	{
-		if (argc != 2)
+		if (argc != 3)
 			goto __print_help;
-		music_list = load_list_from_playlist(argv[1] + 7);
-		if (music_list == NULL)
-			return (2);
+		load_list_from_playlist(argv[2], &display.list);
 	}
 	else
 	{
-		music_list = load_list_from_argv(argv+1, argc-1);
+		load_list_from_argv(argv+1, argc-1, &display.list);
 	}
 
+	if (display.list.l == 0)
+		return (2);
 
-	return (music_player(music_list));
+	lt_get_terminal_size(&display.w, &display.h);
+	get_menu_w_and_h(&display);
+	calcul_display_position(&display);
+	signal(SIGWINCH, &get_term_size);
+
+	return (music_player(&display.list));
 }

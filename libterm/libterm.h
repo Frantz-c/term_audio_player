@@ -83,7 +83,7 @@ int		lt_init(void);
 /*
 **	libterm/update_terminal_size.c
 */
-void	lt_update_terminal_size(void);
+void	lt_get_terminal_size(uint32_t *term_w, uint32_t *term_h);
 
 /*
 **	libterm/terminal_mode.c
